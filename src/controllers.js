@@ -58,7 +58,7 @@ exports.getInvoiceStatus = chargeId => {
         .catch(lnpayError);
 };
 
-exports.redeemGift = ({ giftId, amount, invoice }) => {
+exports.redeemGift = ({ giftId, invoice }) => {
     giftWithdrawTry({
         giftId,
         reference: invoice

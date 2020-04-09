@@ -41,7 +41,31 @@ exports.validateGiftCreation = (amount, senderName, senderMessage, notify, verif
     return result;
 }
 
-exports.getInvoiceAmount = invoice => {
+exports.validateGiftRedeem = (gift, {invoice, verifyCode}) => {
+    var result = {};
+
+    let invoiceAmount = getInvoiceAmount(invoice);
+    if (invoiceAmount !== gift.amount) {
+        result.statusCode = 400;
+        result.err = new Error('BAD_INVOICE_AMOUNT');
+    } else if (gift.spent === 'pending') {
+        result.statusCode = 400;
+        result.err = new Error('GIFT_REDEEM_PENDING');
+    } else if (gift.spent) {
+        result.statusCode = 400;
+        result.err = new Error('GIFT_SPENT');
+    } else if (gift.chargeStatus !== 'paid') {
+        result.statusCode = 400;
+        result.err = new Error('GIFT_INVOICE_UNPAID');
+    } else if (!_.isNil(gift.verifyCode) && Number(verifyCode) !== gift.verifyCode) {
+        result.statusCode = 400;
+        result.err = new Error('BAD_VERIFY_CODE');
+    }
+
+    return result;
+}
+
+const getInvoiceAmount = invoice => {
     const cleanInvoice = invoice.toLowerCase();
 
     let removedNetwork;
@@ -70,21 +94,24 @@ exports.getInvoiceAmount = invoice => {
         invoiceAmount = removedNetwork.substring(0, multiplierPosition);
         invoiceAmount += '00000';
     } else {
-        throw 'Something went wrong with BOLT-11 decoding';
+        throw new Error('Something went wrong with BOLT-11 decoding');
     }
 
     const amountAsNumber = Number(invoiceAmount);
     return amountAsNumber;
 };
 
-exports.buildLNURL = (orderId) =>
-    bech32.encode(
+exports.buildLNURL = (orderId, verifyCode = null) => {
+    let pin = verifyCode ? `?verifyCode=${verifyCode}` : '';
+
+    return bech32.encode(
         'lnurl',
         bech32.toWords(Buffer.from(
-            `${process.env.SERVICE_URL}/lnurl/${orderId}`
+            `${process.env.SERVICE_URL}/lnurl/${orderId}${pin}`
         )),
         1500
     );
+}
 
 exports.trackEvent = (req, eventName, params) => {
     const ip = process.env.NODE_ENV === 'production' ? req.ip : req.headers["x-forwarded-for"];

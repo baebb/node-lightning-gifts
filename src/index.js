@@ -20,10 +20,10 @@ const {
     updateGiftChargeStatus
 } = require('./models');
 const {
-    getInvoiceAmount,
     buildLNURL,
     trackEvent,
-    validateGiftCreation
+    validateGiftCreation,
+    validateGiftRedeem
 } = require('./utils');
 
 const apiLimiter = rateLimit({
@@ -90,7 +90,7 @@ app.post('/create', apiLimiter, (req, res, next) => {
                     lightningInvoice: { payreq: payment_request },
                     amount,
                     notify,
-                    lnurl: buildLNURL(giftId),
+                    lnurl: buildLNURL(giftId, verifyCode),
                     senderName,
                     senderMessage
                 });
@@ -287,32 +287,19 @@ app.post('/redeem/:giftId', apiLimiter, (req, res, next) => {
     const { giftId } = req.params;
 
     getGiftInfo(giftId)
-        .then(response => {
-            if (_.isNil(response)) {
+        .then(gift => {
+            if (_.isNil(gift)) {
                 res.statusCode = 404;
                 next(new Error('GIFT_NOT_FOUND'));
             } else {
-                const { amount, spent, chargeStatus, verifyCode } = response;
-                const { invoice, verifyCode: verifyCodeTry  } = req.body;
-                const invoiceAmount = getInvoiceAmount(invoice);
-
-                if (invoiceAmount !== amount) {
-                    res.statusCode = 400;
-                    next(new Error('BAD_INVOICE_AMOUNT'));
-                } else if (spent === 'pending') {
-                    res.statusCode = 400;
-                    next(new Error('GIFT_REDEEM_PENDING'));
-                } else if (spent) {
-                    res.statusCode = 400;
-                    next(new Error('GIFT_SPENT'));
-                } else if (chargeStatus !== 'paid') {
-                    res.statusCode = 400;
-                    next(new Error('GIFT_INVOICE_UNPAID'));
-                } else if (!_.isNil(verifyCode) && Number(verifyCodeTry) !== verifyCode) {
-                    res.statusCode = 400;
-                    next(new Error('BAD_VERIFY_CODE'));
+                let { err, statusCode } = validateGiftRedeem(gift, req.body)
+                if (err) {
+                    res.statusCode = statusCode;
+                    next(err);
                 } else {
-                    redeemGift({ giftId, amount, invoice })
+                    const { invoice } = req.body;
+
+                    redeemGift({ giftId, invoice })
                         .then(({ id: withdrawalId }) => {
                             trackEvent(req, 'invoice redeem try', { giftId });
                             res.json({ withdrawalId });
@@ -330,52 +317,41 @@ app.post('/redeem/:giftId', apiLimiter, (req, res, next) => {
 
 app.get('/lnurl/:giftId', apiLimiter, (req, res, next) => {
         const { giftId } = req.params;
-        const { pr } = req.query;
+        const { pr: invoice, verifyCode } = req.query;
 
         getGiftInfo(giftId)
-            .then(response => {
-                const { amount, spent, chargeStatus } = response;
-
-                if (_.isNil(response)) {
-                    res.statusCode = 404;
-                    next(new Error('GIFT_NOT_FOUND'));
-                } else if (spent === 'pending') {
-                    res.statusCode = 400;
-                    next(new Error('GIFT_REDEEM_PENDING'));
-                } else if (spent) {
-                    res.statusCode = 400;
-                    next(new Error('GIFT_SPENT'));
-                } else if (chargeStatus !== 'paid') {
-                    res.statusCode = 400;
-                    next(new Error('GIFT_INVOICE_UNPAID'));
-                } else if (_.isNil(pr)) {
-                    // return first lnurl response
+            .then(gift => {
+                if (_.isNil(invoice)) {
+                    // if pr wasn't sent this is the first lnurl call
+                    let pin = verifyCode ? `?verifyCode=${verifyCode}` : '';
                     res.json({
                         status: 'OK',
-                        callback: `${process.env.SERVICE_URL}/lnurl/${giftId}`,
+                        callback: `${process.env.SERVICE_URL}/lnurl/${giftId}${pin}`,
                         k1: giftId,
-                        maxWithdrawable: amount * 1000,
-                        minWithdrawable: amount * 1000,
+                        maxWithdrawable: gift.amount * 1000,
+                        minWithdrawable: gift.amount * 1000,
                         defaultDescription: `lightning.gifts redeem ${giftId}`,
                         tag: 'withdrawRequest'
                     });
-                } else {
-                    // if pr exists we will redeem the gift already
-                    const invoiceAmount = pr ? getInvoiceAmount(pr) : null;
+                    return
+                }
 
-                    if (invoiceAmount !== amount) {
-                        res.statusCode = 400;
-                        next(new Error('BAD_INVOICE_AMOUNT'));
-                    } else {
-                        redeemGift({ giftId, amount, invoice: pr })
-                            .then(() => {
-                                trackEvent(req, 'lnurl redeem try', { giftId });
-                                res.json({ status: 'OK' });
-                            })
-                            .catch(error => {
-                                next(error);
-                            });
-                    }
+                // this is the second lnurl call, so we must validate before redeem
+                if (gift.createdAt._seconds < 1586703600) {
+                    // up to gifts issued at 2020-04-12 we don't check verifyCode here
+                    //      for backwards compatibility
+                    gift.verifyCode = null;
+                }
+                let { err, statusCode } = validateGiftRedeem(gift, {invoice, verifyCode})
+                if (err) {
+                    res.statusCode = statusCode;
+                    next(err);
+                } else {
+                    return redeemGift({ giftId, invoice })
+                        .then(() => {
+                            trackEvent(req, 'lnurl redeem try', { giftId });
+                            res.json({ status: 'OK' });
+                        })
                 }
             })
             .catch(error => {
